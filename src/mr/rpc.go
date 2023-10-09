@@ -24,6 +24,29 @@ type ExampleReply struct {
 
 // Add your RPC definitions here.
 
+// First Request Messages
+type GetTaskRequest struct{}
+
+type GetTaskResponse struct {
+	FileName        string
+	TaskNumber      int // used to refer to intermediate/output
+	PartitionNumber int
+	TaskType        Type
+}
+
+type CompletedTaskRequest struct {
+	FileName string
+	TaskType Type
+}
+
+type CompletedTaskReply struct{}
+
+type Type string
+
+const (
+	mapTask    Type = "mapTask"
+	reduceTask Type = "reduceTask"
+)
 
 // Cook up a unique-ish UNIX-domain socket name
 // in /var/tmp, for the coordinator.
