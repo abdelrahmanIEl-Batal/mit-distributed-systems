@@ -24,7 +24,7 @@ func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
 	// Your worker implementation here.
-	CallExample()
+	RequestTask()
 	// uncomment to send the Example RPC to the coordinator.
 	// CallExample()
 
@@ -33,7 +33,7 @@ func Worker(mapf func(string, string) []KeyValue,
 // example function to show how to make an RPC call to the coordinator.
 //
 // the RPC argument and reply types are defined in rpc.go.
-func CallExample() {
+func RequestTask() {
 
 	// declare an argument structure.
 	args := GetTaskRequest{}
