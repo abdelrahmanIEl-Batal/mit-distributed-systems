@@ -25,13 +25,14 @@ type ExampleReply struct {
 // Add your RPC definitions here.
 
 // First Request Messages
-type GetTaskRequest struct{}
+type GetTaskRequest struct {
+	WorKerId int
+}
 
 type GetTaskResponse struct {
-	FileName        string
-	TaskNumber      int // used to refer to intermediate/output
-	PartitionNumber int
-	TaskType        Type
+	FileName   string
+	TaskNumber int // used to refer to intermediate/output
+	TaskType   Type
 }
 
 type CompletedTaskRequest struct {
