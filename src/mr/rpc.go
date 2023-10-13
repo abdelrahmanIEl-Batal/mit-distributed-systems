@@ -38,9 +38,10 @@ type GetTaskResponse struct {
 type CompletedTaskRequest struct {
 	FileName string
 	TaskType Type
+	WorkerId int
 }
 
-type CompletedTaskReply struct{}
+type CompletedTaskResponse struct{}
 
 type Type string
 
