@@ -1,6 +1,11 @@
 package mr
 
-import "fmt"
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+)
 import "log"
 import "net/rpc"
 import "hash/fnv"
@@ -20,40 +25,104 @@ func ihash(key string) int {
 }
 
 // main/mrworker.go calls this function.
-func Worker(mapf func(string, string) []KeyValue,
-	reducef func(string, []string) string) {
+func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string) string) {
 
-	// Your worker implementation here.
-	RequestTask()
-	// uncomment to send the Example RPC to the coordinator.
-	// CallExample()
+	taskResponse, ok, workerId := RequestTask()
+	// sth happened connecting to coordinator
+	if !ok {
+		return
+	}
+	// no more tasks we exit
+	if taskResponse.TaskType == exit {
+		return
+	}
+	if taskResponse.TaskType == mapTask {
+		// do map here then call done when done
+		fmt.Printf("starting task")
+		DoMapWork(taskResponse, mapf, workerId)
+	} else if taskResponse.TaskType == reduceTask {
+		// do reduce
+	}
 
 }
 
-// example function to show how to make an RPC call to the coordinator.
-//
-// the RPC argument and reply types are defined in rpc.go.
-func RequestTask() {
+func DoMapWork(reply *GetTaskResponse, mapf func(string, string) []KeyValue, workerId int) {
 
-	// declare an argument structure.
-	args := GetTaskRequest{}
-
-	// fill in the argument(s).
-
-	// declare a reply structure.
-	reply := GetTaskResponse{}
-
-	// send the RPC request, wait for the reply.
-	// the "Coordinator.Example" tells the
-	// receiving server that we'd like to call
-	// the Example() method of struct Coordinator.
-	ok := call("Coordinator.ReplyWithTask", &args, &reply)
-	if ok {
-		// reply.Y should be 100.
-		fmt.Printf("reply.Y %v\n", reply.FileName)
-	} else {
-		fmt.Printf("call failed!\n")
+	file, err := os.Open(reply.FileName)
+	if err != nil {
+		fmt.Printf("error opening file")
+		return
 	}
+	content, err := io.ReadAll(file)
+	if err != nil {
+		fmt.Printf("error reading file content")
+		return
+	}
+	err = file.Close()
+	if err != nil {
+		fmt.Printf("error closing file")
+	}
+	result := mapf(reply.FileName, string(content))
+
+	request := ReduceCountRequest{}
+	response := ReduceCountResponse{}
+	ok := call("Coordinator.ReduceCount", &request, &response)
+	if ok {
+		writeMapOutputToFiles(response.ReduceCount, result, reply.TaskNumber, reply.FileName, workerId)
+	} else {
+		println("failed to get reduce count")
+	}
+}
+
+func writeMapOutputToFiles(reduceCount int, data []KeyValue, mapTaskNumber int, mapFileName string, workerId int) {
+	reduces := make([][]KeyValue, reduceCount)
+	for _, res := range data {
+		idx := ihash(res.Key) % reduceCount
+		reduces[idx] = append(reduces[idx], res)
+	}
+	for idx, mapData := range reduces {
+		filename := fmt.Sprintf("mr-%d-%d", mapTaskNumber, idx)
+		file, err := os.Create(filename)
+		if err != nil {
+			fmt.Printf("error creating file")
+			return
+		}
+		// to easily read and write from files
+		enc := json.NewEncoder(file)
+		for _, element := range mapData {
+			err := enc.Encode(&element)
+			if err != nil {
+				fmt.Printf("error writing to file")
+				return
+			}
+		}
+		err = file.Close()
+		if err != nil {
+			fmt.Printf("error closing file")
+			return
+		}
+	}
+	taskDoneReq := CompletedTaskRequest{
+		FileName: mapFileName,
+		WorkerId: workerId,
+		TaskType: mapTask,
+	}
+	taskDoneRes := CompletedTaskResponse{}
+	ok := call("Coordinator.TaskDone", &taskDoneReq, &taskDoneRes)
+	if ok {
+		fmt.Printf("worker finished successfully")
+	} else {
+		fmt.Printf("worker failed")
+	}
+}
+
+func RequestTask() (*GetTaskResponse, bool, int) {
+	args := GetTaskRequest{
+		WorKerId: os.Getpid(), // get id of process running (worker) as id
+	}
+	reply := GetTaskResponse{}
+	ok := call("Coordinator.ReplyWithTask", &args, &reply)
+	return &reply, ok, args.WorKerId
 }
 
 // send an RPC request to the coordinator, wait for the response.
@@ -73,6 +142,6 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 		return true
 	}
 
-	fmt.Println(err)
+	fmt.Println(err, "haha")
 	return false
 }

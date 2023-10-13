@@ -40,16 +40,6 @@ const (
 
 const timeout = 10
 
-// Your code here -- RPC handlers for the worker to call.
-
-// an example RPC handler.
-//
-// the RPC argument and reply types are defined in rpc.go.
-func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
-	reply.Y = args.X + 1
-	return nil
-}
-
 // get uninitiatedTask
 // these are all initial thoughts haven't tested anything
 // we can just mark Task attributes with any marker, to know if there is no avail tasks
@@ -76,7 +66,7 @@ func (c *Coordinator) ReplyWithTask(request *GetTaskRequest, reply *GetTaskRespo
 	} else if c.nReduceTasks > 0 {
 		task = getAvailableTask(c.reduceTasks, request.WorKerId)
 	} else {
-		task = &Task{Status: finished, WorkerId: -1, Number: -1}
+		task = &Task{TaskType: exit}
 	}
 
 	reply.FileName = task.File
@@ -131,6 +121,13 @@ func (c *Coordinator) TaskDone(request *CompletedTaskRequest, response *Complete
 			c.nReduceTasks--
 		}
 	}
+	return nil
+}
+
+func (c *Coordinator) ReduceCount(request *ReduceCountRequest, response *ReduceCountResponse) error {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+	response.ReduceCount = len(c.reduceTasks)
 	return nil
 }
 
