@@ -52,7 +52,7 @@ func getAvailableTask(tasks map[string]*Task, workerId int) *Task {
 			return v
 		}
 	}
-	return &Task{Status: finished, WorkerId: -1, Number: -1}
+	return &Task{Status: finished, WorkerId: -1, Number: -1, TaskType: exit}
 }
 
 // TODO think about concurrency and shared data, this is just a initial thoughts
@@ -72,7 +72,7 @@ func (c *Coordinator) ReplyWithTask(request *GetTaskRequest, reply *GetTaskRespo
 	reply.FileName = task.File
 	reply.TaskType = task.TaskType
 	reply.TaskNumber = task.Number
-	defer c.lock.Unlock()
+	c.lock.Unlock()
 	// wait for task?, use go routing since we are waiting for multiple files not just one
 	go c.WaitTask(task)
 	// this should always return nil, meaning everything is ok, if returned error is not nil
@@ -81,9 +81,14 @@ func (c *Coordinator) ReplyWithTask(request *GetTaskRequest, reply *GetTaskRespo
 }
 
 func (c *Coordinator) WaitTask(task *Task) {
+	if task.TaskType == exit {
+		return
+	}
 	// wait for timeout, if worker hasn't finished yet
 	<-time.After(time.Second * timeout)
 	// we will re-assign this to another worker if not done during timeout
+	c.lock.Lock()
+	defer c.lock.Unlock()
 	if task.Status == inProgress {
 		task.Status = unInitiated
 		task.WorkerId = -1
@@ -116,8 +121,10 @@ func (c *Coordinator) TaskDone(request *CompletedTaskRequest, response *Complete
 	if task.WorkerId == request.WorkerId && task.Status == inProgress {
 		task.Status = finished
 		if task.TaskType == mapTask && c.nMapTasks > 0 {
+			println("decrementing map tasks")
 			c.nMapTasks--
 		} else if task.TaskType == reduceTask && c.nReduceTasks > 0 {
+			println("decrementing reduce tasks")
 			c.nReduceTasks--
 		}
 	}
@@ -127,7 +134,7 @@ func (c *Coordinator) TaskDone(request *CompletedTaskRequest, response *Complete
 func (c *Coordinator) ReduceCount(request *ReduceCountRequest, response *ReduceCountResponse) error {
 	c.lock.Lock()
 	defer c.lock.Unlock()
-	response.ReduceCount = len(c.reduceTasks)
+	response.ReduceCount = c.nReduceTasks
 	return nil
 }
 
@@ -151,6 +158,8 @@ func (c *Coordinator) server() {
 func (c *Coordinator) Done() bool {
 	c.lock.Lock()
 	defer c.lock.Unlock()
+	println(c.nReduceTasks)
+	println(c.nMapTasks)
 	return c.nReduceTasks == 0 && c.nMapTasks == 0
 }
 
@@ -182,7 +191,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		mapTasks:     mapTasks,
 		reduceTasks:  reduceTasks,
 		nMapTasks:    len(mapTasks),
-		nReduceTasks: nReduce,
+		nReduceTasks: len(reduceTasks),
 		lock:         sync.Mutex{},
 	}
 
