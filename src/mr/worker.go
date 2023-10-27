@@ -2,6 +2,7 @@ package mr
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -28,48 +29,39 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
-// main/mrworker.go calls this function.
 func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string) string) {
+	// infinite loop to keep requesting for more tasks
 	for {
-		taskResponse, ok, workerId := RequestTask()
-		// sth happened connecting to coordinator
-		if ok == false {
-			return
-		}
-		// no more tasks we exit
+		taskResponse, workerId, err := RequestTask()
+		haltWorker(err)
 		if taskResponse.TaskType == exit {
-			fmt.Printf("no more tasks available, worker exiting ...")
+			fmt.Println("no more tasks available, worker exiting ...")
 			return
 		}
 		if taskResponse.TaskType == mapTask {
-			// do map here then call done when done
-			fmt.Printf("starting map task ...")
+			//fmt.Println("starting map task ...")
 			DoMapWork(taskResponse, mapf, workerId)
 		} else if taskResponse.TaskType == reduceTask {
-			fmt.Printf("starting reduce task ...")
+			//fmt.Println("starting reduce task ...")
 			DoReduceWork(reducef, taskResponse.TaskNumber, workerId)
 		}
-		// wait for 10 sec before asking for another request, we can tune this to be higher/lower
-		<-time.After(time.Second * 2)
+
+		// wait for 3 sec before asking for another request, we can tune this to be higher/lower
+		<-time.After(time.Second * 3)
 	}
 }
 
 func DoMapWork(reply *GetTaskResponse, mapf func(string, string) []KeyValue, workerId int) {
 
 	file, err := os.Open(reply.FileName)
-	if err != nil {
-		fmt.Printf("error opening file")
-		return
-	}
+	haltWorker(err)
+
 	content, err := io.ReadAll(file)
-	if err != nil {
-		fmt.Printf("error reading file content")
-		return
-	}
+	haltWorker(err)
+
 	err = file.Close()
-	if err != nil {
-		fmt.Printf("error closing file")
-	}
+	haltWorker(err)
+
 	result := mapf(reply.FileName, string(content))
 
 	request := ReduceCountRequest{}
@@ -83,88 +75,74 @@ func DoMapWork(reply *GetTaskResponse, mapf func(string, string) []KeyValue, wor
 }
 
 func writeMapOutputToFiles(reduceCount int, data []KeyValue, mapTaskNumber int, mapFileName string, workerId int) {
-	reduces := make([][]KeyValue, reduceCount)
+	reduces := make(map[int][]KeyValue)
 	for _, res := range data {
 		idx := ihash(res.Key) % reduceCount
 		reduces[idx] = append(reduces[idx], res)
 	}
 
-	for idx, mapData := range reduces {
-		filename := fmt.Sprintf("mr-%d-%d", mapTaskNumber, idx)
-		file, err := os.Create(filepath.Join("map-results", filename))
-		if err != nil {
-			fmt.Printf("error creating file")
-			return
-		}
-		// to easily read and write from files
+	for partitionNum, mapData := range reduces {
+		filename := fmt.Sprintf("mr-%d-%d", mapTaskNumber, partitionNum)
+		file, err := os.Create(filename)
+		haltWorker(err)
 		enc := json.NewEncoder(file)
 		for _, element := range mapData {
 			err := enc.Encode(&element)
-			if err != nil {
-				fmt.Printf("error writing to file")
-				return
-			}
+			haltWorker(err)
 		}
 		err = file.Close()
-		if err != nil {
-			fmt.Printf("error closing file")
-			return
-		}
+		haltWorker(err)
 	}
+
 	taskDoneReq := CompletedTaskRequest{
 		FileName: mapFileName,
 		WorkerId: workerId,
 		TaskType: mapTask,
 	}
 	taskDoneRes := CompletedTaskResponse{}
+
 	ok := call("Coordinator.TaskDone", &taskDoneReq, &taskDoneRes)
 	if ok {
-		fmt.Printf("worker finished successfully")
+		fmt.Println("map task finished successfully")
 	} else {
-		fmt.Printf("worker failed")
+		fmt.Println("map task failed")
 	}
 }
 
 func DoReduceWork(reducef func(string, []string) string, reduceId int, workerId int) {
-	// matches all files with reduceId
-	files, err := filepath.Glob(fmt.Sprintf("%v/mr-%v-%v", "map-results", "*", reduceId))
-	if err != nil {
-		fmt.Printf("error fetting map result files names")
-		return
-	}
+
+	files, err := filepath.Glob(fmt.Sprintf("mr-%v-%v", "*", reduceId))
+	haltWorker(err)
+
 	keyValueMap := make(map[string][]string)
 	tmp := KeyValue{}
 	for _, fileName := range files {
 		file, err := os.Open(fileName)
-		if err != nil {
-			fmt.Printf("error opening file")
-			return
-		}
+		haltWorker(err)
+
 		content := json.NewDecoder(file)
 		for content.More() {
 			err := content.Decode(&tmp)
-			if err != nil {
-				fmt.Printf("error reading from file")
-				return
-			}
+			haltWorker(err)
 			keyValueMap[tmp.Key] = append(keyValueMap[tmp.Key], tmp.Value)
 		}
-		writeReduceOutputToFiles(reducef, keyValueMap, reduceId)
+	}
 
-		taskDoneReq := CompletedTaskRequest{
-			FileName: strconv.Itoa(reduceId),
-			WorkerId: workerId,
-			TaskType: reduceTask,
-		}
-		taskDoneRes := CompletedTaskResponse{}
-		ok := call("Coordinator.TaskDone", &taskDoneReq, &taskDoneRes)
-		if ok {
-			fmt.Printf("worker finished successfully")
-			return
-		} else {
-			fmt.Printf("worker failed")
-			return
-		}
+	writeReduceOutputToFiles(reducef, keyValueMap, reduceId)
+
+	taskDoneReq := CompletedTaskRequest{
+		FileName: strconv.Itoa(reduceId),
+		WorkerId: workerId,
+		TaskType: reduceTask,
+	}
+	taskDoneRes := CompletedTaskResponse{}
+	ok := call("Coordinator.TaskDone", &taskDoneReq, &taskDoneRes)
+	if ok {
+		fmt.Println("worker finished successfully")
+		return
+	} else {
+		fmt.Println("worker failed")
+		return
 	}
 }
 
@@ -175,36 +153,30 @@ func writeReduceOutputToFiles(reducef func(string, []string) string, keyValueMap
 	}
 	sort.Strings(keys)
 
-	// Create temp file
-	filePath := fmt.Sprintf("%v/mr-out-%v-%v", "reduce-results", reduceId, os.Getpid())
-	file, err := os.Create(filePath)
-	if err != nil {
-		fmt.Printf("error creating files")
-		return
-	}
+	filePath := fmt.Sprintf("mr-out-%v", reduceId)
+	file, err := os.OpenFile(filePath, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0644)
+	haltWorker(err)
 	// Call reduce and write to temp file
 	for _, k := range keys {
 		v := reducef(k, keyValueMap[k])
 		_, err := fmt.Fprintf(file, "%v %v\n", k, v)
-		if err != nil {
-			fmt.Printf("error reducing result")
-			return
-		}
+		haltWorker(err)
 	}
 
-	// atomically rename temp files to ensure no one observes partial files
 	file.Close()
-	newPath := fmt.Sprintf("mr-out-%v", reduceId)
-	err = os.Rename(filePath, newPath)
 }
 
-func RequestTask() (*GetTaskResponse, bool, int) {
+func RequestTask() (*GetTaskResponse, int, error) {
 	args := GetTaskRequest{
 		WorKerId: os.Getpid(), // get id of process running (worker) as id
 	}
 	reply := GetTaskResponse{}
 	ok := call("Coordinator.ReplyWithTask", &args, &reply)
-	return &reply, ok, args.WorKerId
+	if ok {
+		return &reply, args.WorKerId, nil
+	} else {
+		return nil, 0, errors.New("error requesting task")
+	}
 }
 
 // send an RPC request to the coordinator, wait for the response.
@@ -223,7 +195,11 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 	if err == nil {
 		return true
 	}
-
-	fmt.Println(err, "haha")
 	return false
+}
+
+func haltWorker(e error) {
+	if e != nil {
+		log.Fatal("error executing worker: ", e)
+	}
 }

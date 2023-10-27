@@ -1,11 +1,5 @@
 package mr
 
-//
-// RPC definitions.
-//
-// remember to capitalize all names.
-//
-
 import "os"
 import "strconv"
 
@@ -14,25 +8,26 @@ type GetTaskRequest struct {
 }
 
 type GetTaskResponse struct {
-	FileName   string
-	TaskNumber int // used to refer to intermediate/output
-	TaskType   Type
+	FileName        string
+	TaskNumber      int // used to refer to intermediate/output
+	PartitionNumber int
+	TaskType        TaskType
 }
 
 type CompletedTaskRequest struct {
 	FileName string
-	TaskType Type
+	TaskType TaskType
 	WorkerId int
 }
 
 type CompletedTaskResponse struct{}
 
-type Type string
+type TaskType string
 
 const (
-	mapTask    Type = "mapTask"
-	reduceTask Type = "reduceTask"
-	exit       Type = "exit"
+	mapTask    TaskType = "mapTask"
+	reduceTask TaskType = "reduceTask"
+	exit       TaskType = "exit"
 )
 
 type ReduceCountRequest struct{}

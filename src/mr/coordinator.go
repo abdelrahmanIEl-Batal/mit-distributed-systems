@@ -13,21 +13,20 @@ import "net/rpc"
 import "net/http"
 
 type Coordinator struct {
-	// Your definitions here.
-	mapTasks     map[string]*Task // will mark each file and its status
-	reduceTasks  map[string]*Task
-	nMapTasks    int
-	nReduceTasks int
-	lock         sync.Mutex
+	mapTasks         map[string]*Task
+	reduceTasks      map[string]*Task
+	nMapRemaining    int
+	nReduceRemaining int
+	nReduce          int
+	lock             sync.Mutex
 }
 
 type Task struct {
-	StartingTime time.Time
-	Number       int
-	Status       TaskStatus
-	WorkerId     int
-	TaskType     Type
-	File         string
+	number   int
+	status   TaskStatus
+	workerId int
+	file     string
+	taskType TaskType
 }
 
 type TaskStatus string
@@ -40,58 +39,51 @@ const (
 
 const timeout = 10
 
-// get uninitiatedTask
-// these are all initial thoughts haven't tested anything
-// we can just mark Task attributes with any marker, to know if there is no avail tasks
 func getAvailableTask(tasks map[string]*Task, workerId int) *Task {
-	for k, v := range tasks {
-		if v.Status == unInitiated {
-			v.Status = inProgress
-			v.WorkerId = workerId
-			v.File = k
+	for _, v := range tasks {
+		if v.status == unInitiated {
+			v.status = inProgress
+			v.workerId = workerId
 			return v
 		}
 	}
-	return &Task{Status: finished, WorkerId: -1, Number: -1, TaskType: exit}
+	return &Task{taskType: exit}
 }
 
-// TODO think about concurrency and shared data, this is just a initial thoughts
-// check if sometask is free and return it
 func (c *Coordinator) ReplyWithTask(request *GetTaskRequest, reply *GetTaskResponse) error {
-	// lock this block to avoid workers getting the same files ig, could be wrong
 	c.lock.Lock()
 	var task *Task
-	if c.nMapTasks > 0 {
+
+	if c.nMapRemaining > 0 {
 		task = getAvailableTask(c.mapTasks, request.WorKerId)
-	} else if c.nReduceTasks > 0 {
+	} else if c.nReduceRemaining > 0 {
 		task = getAvailableTask(c.reduceTasks, request.WorKerId)
 	} else {
-		task = &Task{TaskType: exit}
+		task = &Task{taskType: exit}
 	}
 
-	reply.FileName = task.File
-	reply.TaskType = task.TaskType
-	reply.TaskNumber = task.Number
+	reply.FileName = task.file
+	reply.TaskType = task.taskType
+	reply.TaskNumber = task.number
+
 	c.lock.Unlock()
-	// wait for task?, use go routing since we are waiting for multiple files not just one
 	go c.WaitTask(task)
-	// this should always return nil, meaning everything is ok, if returned error is not nil
-	// then something is wrong with our logic ig?
+
 	return nil
 }
 
 func (c *Coordinator) WaitTask(task *Task) {
-	if task.TaskType == exit {
+	if task.taskType == exit {
 		return
 	}
 	// wait for timeout, if worker hasn't finished yet
 	<-time.After(time.Second * timeout)
-	// we will re-assign this to another worker if not done during timeout
+	// we will re-set task status to unInitiated
 	c.lock.Lock()
 	defer c.lock.Unlock()
-	if task.Status == inProgress {
-		task.Status = unInitiated
-		task.WorkerId = -1
+	if task.status == inProgress {
+		task.status = unInitiated
+		task.workerId = -1
 	}
 }
 
@@ -99,46 +91,44 @@ func (c *Coordinator) TaskDone(request *CompletedTaskRequest, response *Complete
 	c.lock.Lock()
 	defer c.lock.Unlock()
 	var task *Task
-	if request.TaskType == mapTask {
-		pullTask, ok := c.mapTasks[request.FileName]
-		if !ok {
-			fmt.Println("file name is wrong")
-			return nil
-		}
-		task = pullTask
-	} else if request.TaskType == reduceTask {
-		pullTask, ok := c.reduceTasks[request.FileName]
-		if !ok {
-			fmt.Println("file name is wrong")
-			return nil
-		}
-		task = pullTask
-	} else {
-		fmt.Println("wrong task type")
-		return nil
+	var ok bool
+	switch request.TaskType {
+	case mapTask:
+		task, ok = c.mapTasks[request.FileName]
+		pullError(ok)
+	case reduceTask:
+		task, ok = c.reduceTasks[request.FileName]
+		pullError(ok)
+	default:
+		log.Fatal("wrong task type") // worker should never send an exit taskType
 	}
 
-	if task.WorkerId == request.WorkerId && task.Status == inProgress {
-		task.Status = finished
-		if task.TaskType == mapTask && c.nMapTasks > 0 {
-			println("decrementing map tasks")
-			c.nMapTasks--
-		} else if task.TaskType == reduceTask && c.nReduceTasks > 0 {
-			println("decrementing reduce tasks")
-			c.nReduceTasks--
+	if task.workerId == request.WorkerId && task.status == inProgress {
+		task.status = finished
+		if task.taskType == mapTask && c.nMapRemaining > 0 {
+			fmt.Println("decrementing map tasks")
+			c.nMapRemaining--
+		} else if task.taskType == reduceTask && c.nReduceRemaining > 0 {
+			fmt.Println("decrementing reduce tasks")
+			c.nReduceRemaining--
 		}
 	}
 	return nil
+}
+
+func pullError(ok bool) {
+	if !ok {
+		log.Fatal("file name is wrong")
+	}
 }
 
 func (c *Coordinator) ReduceCount(request *ReduceCountRequest, response *ReduceCountResponse) error {
 	c.lock.Lock()
 	defer c.lock.Unlock()
-	response.ReduceCount = c.nReduceTasks
+	response.ReduceCount = c.nReduce
 	return nil
 }
 
-// start a thread that listens for RPCs from worker.go
 func (c *Coordinator) server() {
 	rpc.Register(c)
 	rpc.HandleHTTP()
@@ -152,50 +142,40 @@ func (c *Coordinator) server() {
 	go http.Serve(l, nil)
 }
 
-// main/mrcoordinator.go calls Done() periodically to find out
-// if the entire job has finished.
-// need to handle when task gets re-assigned on timeout
 func (c *Coordinator) Done() bool {
 	c.lock.Lock()
 	defer c.lock.Unlock()
-	println(c.nReduceTasks)
-	println(c.nMapTasks)
-	return c.nReduceTasks == 0 && c.nMapTasks == 0
+	return c.nReduceRemaining == 0
 }
 
-// create a Coordinator.
-// main/mrcoordinator.go calls this function.
-// nReduce is the number of reduce tasks to use.
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
-	// we should have this initialise our mtasks, rtasks map
 	var mapTasks = make(map[string]*Task)
 	for i, file := range files {
-		// will leave the starting time for now
 		mapTasks[file] = &Task{
-			Number:   i,
-			Status:   unInitiated,
-			TaskType: mapTask,
+			number:   i,
+			status:   unInitiated,
+			taskType: mapTask,
+			file:     file,
 		}
 	}
 
 	var reduceTasks = make(map[string]*Task)
 	for i := 0; i < nReduce; i++ {
 		reduceTasks[strconv.Itoa(i)] = &Task{
-			Number:   i,
-			Status:   unInitiated,
-			TaskType: reduceTask,
+			number:   i,
+			status:   unInitiated,
+			taskType: reduceTask,
 		}
 	}
 
 	c := Coordinator{
-		mapTasks:     mapTasks,
-		reduceTasks:  reduceTasks,
-		nMapTasks:    len(mapTasks),
-		nReduceTasks: len(reduceTasks),
-		lock:         sync.Mutex{},
+		mapTasks:         mapTasks,
+		reduceTasks:      reduceTasks,
+		nMapRemaining:    len(mapTasks),
+		nReduceRemaining: nReduce,
+		nReduce:          nReduce,
+		lock:             sync.Mutex{},
 	}
-
-	// Your code here.
 
 	c.server()
 	return &c
