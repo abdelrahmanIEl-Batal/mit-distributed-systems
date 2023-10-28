@@ -34,20 +34,17 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 	for {
 		taskResponse, workerId, err := RequestTask()
 		haltWorker(err)
-		if taskResponse.TaskType == exit {
-			fmt.Println("no more tasks available, worker exiting ...")
-			return
-		}
 		if taskResponse.TaskType == mapTask {
 			//fmt.Println("starting map task ...")
 			DoMapWork(taskResponse, mapf, workerId)
 		} else if taskResponse.TaskType == reduceTask {
 			//fmt.Println("starting reduce task ...")
 			DoReduceWork(reducef, taskResponse.TaskNumber, workerId)
+		} else {
+			fmt.Println("no more tasks available, worker exiting ...")
+			return
 		}
-
-		// wait for 3 sec before asking for another request, we can tune this to be higher/lower
-		<-time.After(time.Second * 3)
+		<-time.After(time.Second * 1)
 	}
 }
 

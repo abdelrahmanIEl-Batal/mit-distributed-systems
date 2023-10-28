@@ -65,26 +65,24 @@ func (c *Coordinator) ReplyWithTask(request *GetTaskRequest, reply *GetTaskRespo
 	reply.FileName = task.file
 	reply.TaskType = task.taskType
 	reply.TaskNumber = task.number
-
 	c.lock.Unlock()
 	go c.WaitTask(task)
-
 	return nil
 }
 
 func (c *Coordinator) WaitTask(task *Task) {
-	if task.taskType == exit {
-		return
-	}
 	// wait for timeout, if worker hasn't finished yet
 	<-time.After(time.Second * timeout)
 	// we will re-set task status to unInitiated
 	c.lock.Lock()
-	defer c.lock.Unlock()
+	if task.taskType == exit {
+		return
+	}
 	if task.status == inProgress {
 		task.status = unInitiated
 		task.workerId = -1
 	}
+	c.lock.Unlock()
 }
 
 func (c *Coordinator) TaskDone(request *CompletedTaskRequest, response *CompletedTaskResponse) error {
