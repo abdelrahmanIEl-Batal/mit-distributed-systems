@@ -61,7 +61,10 @@ type LogCommand struct {
 }
 
 const (
-	ELECTION_INTERVAL   = 300
+	// raft paper says a good timeout is between 150-300 but since tests limits us to 10 heartbeats/second we
+	// should have it more than the raft paper range but not too large
+	ELECTION_INTERVAL = 400
+	// test needs no more 10 heartbeats every secon, a good number can be 150-200
 	HEART_BEAT_INTERVAL = 150
 )
 
@@ -172,17 +175,39 @@ type RequestVoteReply struct {
 	VoteGranted bool
 }
 
+type AppendEntriesArgs struct {
+	LeaderTerm        int
+	LeaderId          int
+	PrevLogIndex      int
+	PrevLogTerm       int
+	Entries           []LogCommand
+	LeaderCommitIndex int
+}
+
+type AppendEntriesReply struct {
+	Term    int
+	Success bool
+}
+
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	DebugPrint("[%v] receives request to vote from [%v] at term[%v]", rf.me, args.CandidateId, args.Term)
-	DebugPrint("current term for voter [%v]", rf.currentTerm)
+	// DebugPrint("current term for voter [%v]", rf.currentTerm)
 	defer rf.mu.Unlock()
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
 		return
+	}
+	if args.Term > rf.currentTerm {
+		rf.ConvertToFollower(args.Term)
+		rf.votedFor = args.CandidateId
+	} else {
+		if rf.votedFor == -1 {
+			rf.votedFor = args.CandidateId
+		}
 	}
 	currentLastLogTerm := rf.log[len(rf.log)-1].Term
 	currentLastLogIndex := len(rf.log)
@@ -196,6 +221,34 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return
 	}
 	reply.VoteGranted = false
+}
+
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	DebugPrint("[%v] received heartbeat from [%v]", rf.me, args.LeaderId)
+	rf.lastHeartBeat = time.Now()
+	reply.Term = rf.currentTerm
+	if rf.currentTerm > args.LeaderTerm {
+		reply.Success = false
+		return
+	}
+	if args.LeaderTerm > rf.currentTerm {
+		rf.ConvertToFollower(args.LeaderTerm)
+	}
+	if len(rf.log) < args.PrevLogIndex {
+		reply.Success = false
+		return
+	}
+	if rf.log[args.PrevLogIndex-1].Term != args.PrevLogTerm {
+		reply.Success = false
+		rf.log = rf.log[:args.PrevLogIndex]
+	} else {
+		rf.log = append(rf.log, args.Entries...)
+		if args.LeaderCommitIndex > rf.commitIndex {
+			rf.commitIndex = min(args.LeaderCommitIndex, len(rf.log))
+		}
+	}
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -311,7 +364,6 @@ func (rf *Raft) StartElection() {
 		}
 		go func(server int) {
 			rf.mu.Lock()
-			defer rf.mu.Unlock()
 			request := RequestVoteArgs{
 				Term:         term,
 				CandidateId:  candidateId,
@@ -319,16 +371,20 @@ func (rf *Raft) StartElection() {
 				LastLogTerm:  lastLogTerm,
 			}
 			reply := RequestVoteReply{}
+			rf.mu.Unlock()
 			voteGranted := rf.sendRequestVote(server, &request, &reply)
-			DebugPrint("[%v] voted: %v for candidate[%v]", server, voteGranted, request.CandidateId)
-			if !voteGranted {
+			DebugPrint("[%v] voted: %v for candidate[%v]", server, reply.VoteGranted, request.CandidateId)
+			rf.mu.Lock()
+			defer rf.mu.Unlock()
+			if !voteGranted { // connection issue we don't get a reply
 				return
 			}
 			if reply.Term > rf.currentTerm {
 				rf.ConvertToFollower(reply.Term)
 				return
+			} else if reply.VoteGranted {
+				votes++
 			}
-			votes++
 			if votes <= len(rf.peers)/2 || finished {
 				return
 			}
@@ -336,13 +392,59 @@ func (rf *Raft) StartElection() {
 			if rf.currentTerm != term || rf.state != Candidate {
 				return
 			}
-			DebugPrint("[%v] is elected leader at term[%v]", candidateId, term)
+			DebugPrint("[%v] is elected leader at term[%v] with votes[%v]", candidateId, term, votes)
 			rf.ConvertToLeader()
+			for j := 0; j < len(rf.peers); j++ {
+				if j != rf.me {
+					go rf.LeaderOperation(j)
+				}
+			}
 		}(i)
 	}
 }
 
+func (rf *Raft) LeaderOperation(pid int) {
+	for rf.killed() == false {
+		rf.mu.Lock()
+		if rf.state != Leader {
+			DebugPrint("[%v] not leader anymore", rf.me)
+			rf.mu.Unlock()
+			return
+		}
+		DebugPrint("[%v] leader attempting to send heartbeat every %v milliseconds", rf.me, HEART_BEAT_INTERVAL)
+		rf.mu.Unlock()
+		go rf.sendAppendEntries(pid)
+		time.Sleep(time.Duration(HEART_BEAT_INTERVAL) * time.Millisecond)
+	}
+}
+
+func (rf *Raft) sendAppendEntries(server int) {
+	rf.mu.Lock()
+	args := AppendEntriesArgs{
+		LeaderTerm:        rf.currentTerm,
+		LeaderId:          rf.me,
+		PrevLogIndex:      len(rf.log),
+		PrevLogTerm:       rf.log[len(rf.log)-1].Term,
+		LeaderCommitIndex: -1,
+		Entries:           nil,
+	}
+	reply := AppendEntriesReply{}
+	rf.mu.Unlock()
+	DebugPrint("[%v] sending heartbeat to [%v]", rf.me, server)
+	// remember don't lock while doing RPC call
+	ok := rf.peers[server].Call("Raft.AppendEntries", &args, &reply)
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if !ok {
+		return
+	}
+	if reply.Term > rf.currentTerm {
+		rf.ConvertToFollower(reply.Term)
+	}
+}
+
 func (rf *Raft) ConvertToCandidate() {
+	DebugPrint("[%v] converting to candidate", rf.me)
 	rf.currentTerm += 1
 	rf.votedFor = rf.me
 	rf.lastHeartBeat = time.Now() // resetting election timer
@@ -350,6 +452,7 @@ func (rf *Raft) ConvertToCandidate() {
 }
 
 func (rf *Raft) ConvertToFollower(correctTerm int) {
+	DebugPrint("[%v] converting to follower", rf.me)
 	rf.state = Follower
 	rf.votedFor = -1
 	rf.lastHeartBeat = time.Now() // reset timeout
@@ -357,6 +460,7 @@ func (rf *Raft) ConvertToFollower(correctTerm int) {
 }
 
 func (rf *Raft) ConvertToLeader() {
+	DebugPrint("[%v] converting to leader", rf.me)
 	rf.state = Leader
 	rf.lastHeartBeat = time.Now()
 }
@@ -395,7 +499,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	return rf
 }
 
-const DEBUG_PRINT = true
+const DEBUG_PRINT = false
 
 func DebugPrint(format string, a ...interface{}) (n int, err error) {
 	if DEBUG_PRINT {
