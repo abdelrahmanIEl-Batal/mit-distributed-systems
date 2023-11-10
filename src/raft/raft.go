@@ -62,9 +62,9 @@ type LogCommand struct {
 const (
 	// raft paper says a good timeout is between 150-300 but since tests limits us to 10 heartbeats/second we
 	// should have it more than the raft paper range but not too large
-	ELECTION_INTERVAL = 400
+	ELECTION_INTERVAL = 300
 	// test needs no more 10 heartbeats every secon, a good number can be 150-200
-	HEART_BEAT_INTERVAL = 150
+	HEART_BEAT_INTERVAL = 100
 )
 
 // A Go object implementing a single Raft peer.
