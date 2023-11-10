@@ -457,8 +457,24 @@ func (rf *Raft) sendAppendEntries(server int) {
 	if reply.Success {
 		rf.nextIndex[server] = rf.matchIndex[server] + 1
 		rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
+		go func() {
+			rf.mu.Lock()
+			defer rf.mu.Unlock()
+			for i := len(rf.log) - 1; i > rf.commitIndex; i-- {
+				count := 0
+				for _, matchIndex := range rf.matchIndex {
+					if matchIndex >= i {
+						count++
+					}
+				}
 
-		rf.UpdateCommitIndex()
+				if count > len(rf.peers)/2 {
+					rf.commitIndex = i
+					rf.ApplyLog()
+					break
+				}
+			}
+		}()
 	} else {
 		if reply.Term > rf.currentTerm {
 			rf.ConvertToFollower(reply.Term)
@@ -499,23 +515,6 @@ func (rf *Raft) InitialiseLeaderState() {
 	for i := 0; i < len(rf.peers); i++ {
 		rf.nextIndex[i] = len(rf.log)
 		rf.matchIndex[i] = 0
-	}
-}
-
-func (rf *Raft) UpdateCommitIndex() {
-	for i := len(rf.log) - 1; i > rf.commitIndex; i-- {
-		count := 0
-		for _, matchIndex := range rf.matchIndex {
-			if matchIndex >= i {
-				count++
-			}
-		}
-
-		if count > len(rf.peers)/2 {
-			rf.commitIndex = i
-			rf.ApplyLog()
-			break
-		}
 	}
 }
 
