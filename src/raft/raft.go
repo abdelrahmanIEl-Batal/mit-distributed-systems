@@ -2,7 +2,6 @@ package raft
 
 import (
 	"6.824/labrpc"
-	"log"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -457,6 +456,7 @@ func (rf *Raft) sendAppendEntries(server int) {
 	if reply.Success {
 		rf.nextIndex[server] = rf.matchIndex[server] + 1
 		rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
+		// update commitIndex
 		go func() {
 			rf.mu.Lock()
 			defer rf.mu.Unlock()
@@ -576,13 +576,4 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	go rf.LeaderElection()
 
 	return rf
-}
-
-const DEBUG_PRINT = false
-
-func DebugPrint(format string, a ...interface{}) (n int, err error) {
-	if DEBUG_PRINT {
-		log.Printf(format, a...)
-	}
-	return
 }
