@@ -62,7 +62,7 @@ type LogCommand struct {
 const (
 	// raft paper says a good timeout is between 150-300 but since tests limits us to 10 heartbeats/second we
 	// should have it more than the raft paper range but not too large
-	ELECTION_INTERVAL = 200
+	ELECTION_INTERVAL = 150
 	// test needs no more 10 heartbeats every secon, a good number can be 150-200
 	HEART_BEAT_INTERVAL = 100
 )
@@ -461,12 +461,10 @@ func (rf *Raft) sendAppendEntries(server int) {
 			rf.mu.Lock()
 			defer rf.mu.Unlock()
 			for i := len(rf.log) - 1; i > rf.commitIndex; i-- {
-				count := 1
-				for i, matchIndex := range rf.matchIndex {
-					if i != rf.me {
-						if matchIndex > rf.commitIndex {
-							count++
-						}
+				count := 0
+				for _, matchIndex := range rf.matchIndex {
+					if matchIndex >= i {
+						count++
 					}
 				}
 
@@ -565,6 +563,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.log = make([]LogCommand, 1)
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
+	for i := 0; i < len(rf.peers); i++ {
+		rf.matchIndex[i] = 0
+		rf.nextIndex[i] = len(rf.log)
+	}
 	rf.applyChannel = applyCh
 	DebugPrint("[%v] initialised", rf.me)
 	// initialize from state persisted before a crash
