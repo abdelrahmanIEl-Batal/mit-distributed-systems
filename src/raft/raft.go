@@ -1,7 +1,9 @@
 package raft
 
 import (
+	"6.824/labgob"
 	"6.824/labrpc"
+	"bytes"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -108,14 +110,12 @@ func (rf *Raft) GetState() (int, bool) {
 // where it can later be retrieved after a crash and restart.
 // see paper's Figure 2 for a description of what should be persistent.
 func (rf *Raft) persist() {
-	// Your code here (2C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
+	byteBuffer := new(bytes.Buffer)
+	encoder := labgob.NewEncoder(byteBuffer)
+	encoder.Encode(rf.currentTerm)
+	encoder.Encode(rf.votedFor)
+	encoder.Encode(rf.log)
+	rf.persister.SaveRaftState(byteBuffer.Bytes())
 }
 
 // restore previously persisted state.
@@ -123,19 +123,16 @@ func (rf *Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
-	// Your code here (2C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	var currentTerm, votedFor int
+	var log []LogCommand
+	byteBuffer := bytes.NewBuffer(data)
+	decoder := labgob.NewDecoder(byteBuffer)
+	if decoder.Decode(&currentTerm) != nil || decoder.Decode(&votedFor) != nil || decoder.Decode(&log) != nil {
+		return
+	}
+	rf.currentTerm = currentTerm
+	rf.votedFor = votedFor
+	rf.log = log
 }
 
 // A service wants to switch to snapshot.  Only do so if Raft hasn't
@@ -201,11 +198,12 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return
 	}
 	if args.Term > rf.currentTerm {
+		rf.votedFor = -1
 		rf.ConvertToFollower(args.Term)
-		rf.votedFor = args.CandidateId
 	} else {
 		if rf.votedFor == -1 {
 			rf.votedFor = args.CandidateId
+			rf.persist()
 		}
 	}
 	currentLastLogTerm := rf.log[len(rf.log)-1].Term
@@ -222,6 +220,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.VoteGranted = false
 }
 
+// TODO, optimize the number of rejected RPC to pass the Figure 8 (unreliable) test
+// append entries should return the mismatched index for the nextIdx[server]
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -244,12 +244,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if len(rf.log) == args.PrevLogIndex+1 || (len(args.Entries) > 0 && rf.log[args.PrevLogIndex+1].Term != args.Entries[0].Term) {
 		rf.log = rf.log[:args.PrevLogIndex+1]
 		rf.log = append(rf.log, args.Entries...)
+		rf.persist()
 	}
 	if args.LeaderCommitIndex > rf.commitIndex {
 		rf.commitIndex = min(args.LeaderCommitIndex, len(rf.log)-1)
 		rf.ApplyLog()
 	}
-
 	reply.Term = rf.currentTerm
 	reply.Success = true
 }
@@ -307,6 +307,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.log = append(rf.log, LogCommand{Term: term, Command: command})
 		rf.nextIndex[rf.me] = index + 1
 		rf.matchIndex[rf.me] = index
+		rf.persist()
 	}
 	return index, term, isLeader
 }
@@ -491,6 +492,7 @@ func (rf *Raft) ConvertToCandidate() {
 	rf.votedFor = rf.me
 	rf.lastHeartBeat = time.Now() // resetting election timer
 	rf.state = Candidate
+	rf.persist()
 }
 
 func (rf *Raft) ConvertToFollower(correctTerm int) {
@@ -499,13 +501,16 @@ func (rf *Raft) ConvertToFollower(correctTerm int) {
 	rf.votedFor = -1
 	rf.lastHeartBeat = time.Now() // reset timeout
 	rf.currentTerm = correctTerm
+	rf.persist()
 }
 
 func (rf *Raft) ConvertToLeader() {
 	DebugPrint("[%v] converting to leader", rf.me)
 	rf.state = Leader
 	rf.lastHeartBeat = time.Now()
+	rf.votedFor = -1
 	rf.InitialiseLeaderState()
+	rf.persist()
 }
 
 func (rf *Raft) InitialiseLeaderState() {
